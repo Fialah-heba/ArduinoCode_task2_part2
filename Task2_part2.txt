@@ -1,0 +1,175 @@
+#include <Wire.h>
+#include <LiquidCrystal.h>
+
+// LCD Pin Definitions
+const int rs = 7, en = 6, d4 = 5, d5 = 10, d6 = 12, d7 = 13;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+// Motor control pins
+#define MOTOR_A_EN 11   // Enable pin for Motor A (PWM) 
+#define MOTOR_A_IN1 8   // Input 1 for Motor A (Direction)
+#define MOTOR_A_IN2 9   // Input 2 for Motor A (Direction)
+
+// Encoder pins
+#define Encoder_output_A 2 // Encoder output A connected to pin 2 (Interrupt)
+#define Encoder_output_B 3 // Encoder output B connected to pin 3
+
+// Encoder variables
+volatile int Count_pulses = 0; // Pulse count
+float motorAngle = 0; // Global motor angle
+const int pulsesPerRevolution = 67;  // Number of pulses per revolution
+const float degreePerPulse = 360.0 / pulsesPerRevolution;  // Degrees per pulse (5.37° per pulse)
+
+// Motor state variables
+String motorDirection = "STOP"; // CW or CCW
+int speed = 150; // Motor speed (PWM value)
+
+// MPU6050 I2C Address
+const int MPU_ADDR = 0x68;
+
+// Variables for accelerometer and gyroscope data
+int16_t accelX, accelY, accelZ;
+int16_t gyroX;
+float angleX = 0.0;      // Filtered angle
+float gyroAngleX = 0.0;  // Angle from gyroscope
+float accelAngleX = 0.0; // Angle from accelerometer
+unsigned long prevTime;
+
+const float alpha = 0.98; // Complementary filter coefficient
+const float angleThreshold = 5.0; // Angle difference threshold for motor movement (degrees)
+const float resetThreshold = 2.0; // Threshold for resetting the motor angle after stopping
+
+void setup() {
+  // Initialize Serial Monitor
+  Serial.begin(9600);
+
+  // Initialize LCD
+  lcd.begin(16, 2);
+  lcd.print("Initializing...");
+
+  // Initialize MPU6050
+  Wire.begin();
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B);  // Power management register
+  Wire.write(0);     // Wake up the MPU6050
+  Wire.endTransmission(true);
+
+  // Display setup complete
+  lcd.clear();
+  lcd.print("Setup Complete");
+  lcd.clear();
+
+  // Initialize motor control pins as outputs
+  pinMode(MOTOR_A_EN, OUTPUT);
+  pinMode(MOTOR_A_IN1, OUTPUT);
+  pinMode(MOTOR_A_IN2, OUTPUT);
+
+  // Initialize encoder pins as inputs
+  pinMode(Encoder_output_A, INPUT);
+  pinMode(Encoder_output_B, INPUT);
+
+  // Attach interrupt for encoder output A
+  attachInterrupt(digitalPinToInterrupt(Encoder_output_A), DC_Motor_Encoder, RISING);
+
+  // Record the initial time
+  prevTime = millis();
+}
+
+void loop() {
+  // Read accelerometer and gyroscope data from MPU6050
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B);  // Starting register for accelerometer data
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_ADDR, 14, true);
+
+  // Combine high and low bytes for accelerometer and gyroscope
+  accelX = Wire.read() << 8 | Wire.read();
+  accelY = Wire.read() << 8 | Wire.read();
+  accelZ = Wire.read() << 8 | Wire.read();
+  Wire.read(); Wire.read(); // Skip temperature data
+  gyroX = Wire.read() << 8 | Wire.read();
+
+  // Calculate the time elapsed
+  unsigned long currentTime = millis();
+  float elapsedTime = (currentTime - prevTime) / 1000.0;
+  prevTime = currentTime;
+
+  // Calculate angle from accelerometer
+  accelAngleX = atan2(accelY, accelZ) * 180 / 3.14159;
+
+  // Convert gyroscope raw data to degrees per second
+  float gyroXRate = gyroX / 131.0;
+
+  // Calculate angle from gyroscope
+  gyroAngleX += gyroXRate * elapsedTime;
+
+  // Combine accelerometer and gyroscope data using a complementary filter
+  angleX = alpha * (angleX + gyroXRate * elapsedTime) + (1 - alpha) * accelAngleX;
+
+  // Calculate motor angle from encoder pulses
+  motorAngle = Count_pulses * degreePerPulse;
+
+  // Motor control based on angle
+  if (angleX < 0 ){
+    if (motorAngle < angleX) {
+      digitalWrite(MOTOR_A_IN1, LOW);
+      digitalWrite(MOTOR_A_IN2, HIGH);
+      analogWrite(MOTOR_A_EN, 150);  // Increased speed for better movement
+      motorDirection = "CW";
+    } else if (motorAngle > angleX) {
+      digitalWrite(MOTOR_A_IN1, HIGH);
+      digitalWrite(MOTOR_A_IN2, LOW);
+      analogWrite(MOTOR_A_EN, 150);  // Increased speed for better movement
+      motorDirection = "CCW";
+    } else {
+      motorDirection = "Stopped";
+      analogWrite(MOTOR_A_EN, 0);
+    }
+  }else if (angleX > 0 ){
+    if (motorAngle < angleX) {
+      digitalWrite(MOTOR_A_IN1, LOW);
+      digitalWrite(MOTOR_A_IN2, HIGH);
+      analogWrite(MOTOR_A_EN, 150);  // Increased speed for better movement
+      motorDirection = "CW";
+    } else if (motorAngle > angleX) {
+      digitalWrite(MOTOR_A_IN1, HIGH);
+      digitalWrite(MOTOR_A_IN2, LOW);
+      analogWrite(MOTOR_A_EN, 150);  // Increased speed for better movement
+    } else {
+      motorDirection = "Stopped";
+      analogWrite(MOTOR_A_EN, 0);
+    }
+  }
+
+  // Debugging prints to monitor the angle calculations
+  Serial.print("MPU Angle: ");
+  Serial.print(angleX, 2);
+  Serial.print("° | Motor Angle: ");
+  Serial.print(motorAngle, 2);  // In degrees
+  Serial.print("° | Direction: ");
+  Serial.println(motorDirection);
+
+  // Display Data
+  lcd.setCursor(0, 0);
+  lcd.print("MPU: ");
+  lcd.print(angleX, 1);
+  lcd.print((char)223);
+  lcd.print("   ");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Motor: ");
+  lcd.print(motorAngle, 1);  // In degrees
+  lcd.print((char)223);
+  lcd.print("   ");
+
+  delay(100);  // Update every 50 ms
+}
+
+void DC_Motor_Encoder() {
+  int b = digitalRead(Encoder_output_B);
+  if (b == HIGH) {
+    Count_pulses--;
+  } else {
+    Count_pulses++;
+  }
+}
